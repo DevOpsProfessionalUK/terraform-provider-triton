@@ -2,7 +2,7 @@ package triton
 
 import (
 	"encoding/pem"
-	"errors"
+	stderrors "errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -15,7 +15,7 @@ import (
 	"github.com/hashicorp/terraform/terraform"
 	triton "github.com/joyent/triton-go"
 	"github.com/joyent/triton-go/authentication"
-	"github.com/joyent/triton-go/compute"
+	"github.com/joyent/triton-go/errors"
 )
 
 // Provider returns a terraform.ResourceProvider.
@@ -73,6 +73,7 @@ func Provider() terraform.ResourceProvider {
 			"triton_machine":       resourceMachine(),
 			"triton_snapshot":      resourceSnapshot(),
 			"triton_vlan":          resourceVLAN(),
+			"triton_volume":        resourceVolume(),
 		},
 		ConfigureFunc: providerConfigure,
 	}
@@ -92,13 +93,13 @@ func (c Config) validate() error {
 	var err *multierror.Error
 
 	if c.URL == "" {
-		err = multierror.Append(err, errors.New("URL must be configured for the Triton provider"))
+		err = multierror.Append(err, stderrors.New("URL must be configured for the Triton provider"))
 	}
 	if c.KeyID == "" {
-		err = multierror.Append(err, errors.New("Key ID must be configured for the Triton provider"))
+		err = multierror.Append(err, stderrors.New("Key ID must be configured for the Triton provider"))
 	}
 	if c.Account == "" {
-		err = multierror.Append(err, errors.New("Account must be configured for the Triton provider"))
+		err = multierror.Append(err, stderrors.New("Account must be configured for the Triton provider"))
 	}
 
 	return err.ErrorOrNil()
@@ -197,7 +198,7 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 
 func resourceExists(resource interface{}, err error) (bool, error) {
 	if err != nil {
-		if compute.IsResourceNotFound(err) {
+		if errors.IsResourceNotFound(err) {
 			return false, nil
 		}
 

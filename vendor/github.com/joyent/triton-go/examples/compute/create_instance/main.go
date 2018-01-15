@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2018, Joyent, Inc. All rights reserved.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+//
+
 package main
 
 import (
@@ -13,13 +21,14 @@ import (
 	"github.com/joyent/triton-go/authentication"
 	"github.com/joyent/triton-go/compute"
 	"github.com/joyent/triton-go/network"
+	"github.com/joyent/triton-go/testutils"
 )
 
 const (
 	PackageName  = "g4-highcpu-512M"
 	ImageName    = "ubuntu-16.04"
 	ImageVersion = "20170403"
-	NetworkName  = "Joyent-SDC-Private"
+	NetworkName  = "Joyent-SDC-Public"
 )
 
 func main() {
@@ -113,7 +122,7 @@ func main() {
 	// Create a new instance using our input attributes...
 	// https://github.com/joyent/triton-go/blob/master/compute/instances.go#L206
 	createInput := &compute.CreateInstanceInput{
-		Name:     "go-test1",
+		Name:     testutils.RandString(10),
 		Package:  PackageName,
 		Image:    img.ID,
 		Networks: []string{net.Id},
