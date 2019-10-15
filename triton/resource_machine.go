@@ -3,6 +3,7 @@ package triton
 import (
 	"context"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -79,9 +80,7 @@ func resourceMachine() *schema.Resource {
 				Description: "IP addresses assigned to the machine",
 				Type:        schema.TypeList,
 				Computed:    true,
-				Elem: &schema.Schema{
-					Type: schema.TypeString,
-				},
+				Elem:        &schema.Schema{Type: schema.TypeString},
 			},
 			"tags": {
 				Description: "Machine tags",
@@ -104,9 +103,36 @@ func resourceMachine() *schema.Resource {
 							Description: "Assign CNS service names to this instance",
 							Optional:    true,
 							Type:        schema.TypeList,
-							Elem: &schema.Schema{
-								Type: schema.TypeString,
-							},
+							Elem:        &schema.Schema{Type: schema.TypeString},
+						},
+					},
+				},
+			},
+			"affinity": {
+				Description: "Label based affinity rules for assisting instance placement",
+				Type:        schema.TypeList,
+				Optional:    true,
+				ForceNew:    true,
+				Elem:        &schema.Schema{Type: schema.TypeString},
+			},
+			"locality": {
+				Description: "UUID based locality hints for assisting placement behavior",
+				Type:        schema.TypeList,
+				Optional:    true,
+				MaxItems:    1,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"close_to": {
+							Description: "UUIDs of other instances to attempt to provision alongside",
+							Optional:    true,
+							Type:        schema.TypeList,
+							Elem:        &schema.Schema{Type: schema.TypeString},
+						},
+						"far_from": {
+							Description: "UUIDs of other instances to attempt not to provision alongside",
+							Optional:    true,
+							Type:        schema.TypeList,
+							Elem:        &schema.Schema{Type: schema.TypeString},
 						},
 					},
 				},
@@ -142,6 +168,16 @@ func resourceMachine() *schema.Resource {
 				Type:        schema.TypeString,
 				Computed:    true,
 			},
+
+			"networks": {
+				Description: "Desired network IDs",
+				Type:        schema.TypeList,
+				Optional:    true,
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
+			},
+
 			"nic": {
 				Description: "Network interface",
 				Type:        schema.TypeSet,
@@ -239,18 +275,6 @@ func resourceMachine() *schema.Resource {
 				Optional:    true,
 				ForceNew:    true,
 			},
-
-			// deprecated fields
-			"networks": {
-				Description: "Desired network IDs",
-				Type:        schema.TypeList,
-				Optional:    true,
-				Computed:    true,
-				Deprecated:  "Networks is deprecated, please use `nic`",
-				Elem: &schema.Schema{
-					Type: schema.TypeString,
-				},
-			},
 		},
 	}
 }
@@ -262,14 +286,19 @@ func resourceMachineCreate(d *schema.ResourceData, meta interface{}) error {
 		return err
 	}
 
+	var affinity []string
+	for _, rule := range d.Get("affinity").([]interface{}) {
+		affinity = append(affinity, rule.(string))
+	}
+
+	if len(affinity) > 0 {
+		client.affinityLock.Lock()
+		defer client.affinityLock.Unlock()
+	}
+
 	var networks []string
 	for _, network := range d.Get("networks").([]interface{}) {
 		networks = append(networks, network.(string))
-	}
-	nics := d.Get("nic").(*schema.Set)
-	for _, nicI := range nics.List() {
-		nic := nicI.(map[string]interface{})
-		networks = append(networks, nic["network"].(string))
 	}
 
 	metadata := map[string]string{}
@@ -310,16 +339,43 @@ func resourceMachineCreate(d *schema.ResourceData, meta interface{}) error {
 		}
 	}
 
-	machine, err := c.Instances().Create(context.Background(), &compute.CreateInstanceInput{
+	createInput := &compute.CreateInstanceInput{
 		Name:            d.Get("name").(string),
 		Package:         d.Get("package").(string),
 		Image:           d.Get("image").(string),
 		Networks:        networks,
 		Metadata:        metadata,
+		Affinity:        affinity,
 		Tags:            tags,
 		CNS:             cns,
 		FirewallEnabled: d.Get("firewall_enabled").(bool),
-	})
+	}
+
+	if nearRaw, found := d.GetOk("locality.0.close_to"); found {
+		nearList := nearRaw.([]interface{})
+		localNear := make([]string, len(nearList))
+		for i, val := range nearList {
+			valStr := val.(string)
+			if valStr != "" {
+				localNear[i] = valStr
+			}
+		}
+		createInput.LocalityNear = localNear
+	}
+
+	if farRaw, found := d.GetOk("locality.0.far_from"); found {
+		farList := farRaw.([]interface{})
+		localFar := make([]string, len(farList))
+		for i, val := range farList {
+			valStr := val.(string)
+			if valStr != "" {
+				localFar[i] = valStr
+			}
+		}
+		createInput.LocalityFar = localFar
+	}
+
+	machine, err := c.Instances().Create(context.Background(), createInput)
 	if err != nil {
 		return err
 	}
@@ -342,7 +398,7 @@ func resourceMachineCreate(d *schema.ResourceData, meta interface{}) error {
 			if hasInitDomainNames(d, inst) {
 				return inst, inst.State, nil
 			}
-			return inst, machineStateProvisioning, nil
+			return inst, inst.State, nil
 		},
 		Timeout:    machineStateChangeTimeout,
 		MinTimeout: 3 * time.Second,
@@ -431,7 +487,6 @@ func resourceMachineRead(d *schema.ResourceData, meta interface{}) error {
 		networks = append(networks, nic.Network)
 	}
 	d.Set("nic", machineNICs)
-	d.Set("networks", networks)
 
 	for argumentName, metadataKey := range metadataArgumentsToKeys {
 		d.Set(argumentName, machine.Metadata[metadataKey])
@@ -650,39 +705,76 @@ func resourceMachineUpdate(d *schema.ResourceData, meta interface{}) error {
 		d.SetPartial("firewall_enabled")
 	}
 
-	if d.HasChange("nic") {
-		o, n := d.GetChange("nic")
-		if o == nil {
-			o = new(schema.Set)
-		}
-		if n == nil {
-			n = new(schema.Set)
+	if d.HasChange("networks") {
+
+		nics, err := c.Instances().ListNICs(context.Background(), &compute.ListNICsInput{
+			InstanceID: d.Id(),
+		})
+		if err != nil {
+			return err
 		}
 
-		oldNICs := o.(*schema.Set)
-		newNICs := n.(*schema.Set)
+		oRaw, nRaw := d.GetChange("networks")
+		o := oRaw.([]interface{})
+		n := nRaw.([]interface{})
 
-		for _, nicI := range newNICs.Difference(oldNICs).List() {
-			nic := nicI.(map[string]interface{})
-			if _, err := c.Instances().AddNIC(context.Background(), &compute.AddNICInput{
-				InstanceID: d.Id(),
-				Network:    nic["network"].(string),
-			}); err != nil {
-				return err
+		for _, new := range n {
+			var nicId string
+
+			for _, old := range o {
+				exists := false
+				nicId = old.(string)
+				if old.(string) == new.(string) {
+					exists = true
+				}
+				if !exists {
+					var macId string
+					for _, nic := range nics {
+						if nic.Network == nicId {
+							macId = nic.MAC
+						}
+					}
+
+					log.Printf("[DEBUG] Removing NIC with MacId %s", macId)
+					_, err := retryOnError(compute.IsResourceFound, func() (interface{}, error) {
+						err := c.Instances().RemoveNIC(context.Background(), &compute.RemoveNICInput{
+							InstanceID: d.Id(),
+							MAC:        macId,
+						})
+						return nil, err
+					})
+					if err != nil {
+						return err
+					}
+				}
 			}
 		}
 
-		for _, nicI := range oldNICs.Difference(newNICs).List() {
-			nic := nicI.(map[string]interface{})
-			if err := c.Instances().RemoveNIC(context.Background(), &compute.RemoveNICInput{
-				InstanceID: d.Id(),
-				MAC:        nic["mac"].(string),
-			}); err != nil {
-				return err
+		for _, old := range o {
+
+			for _, new := range n {
+				exists := false
+				if old.(string) == new.(string) {
+					exists = true
+				}
+				if !exists {
+
+					log.Printf("[DEBUG] Adding NIC with Network %s", new.(string))
+					_, err := retryOnError(compute.IsResourceFound, func() (interface{}, error) {
+						_, err := c.Instances().AddNIC(context.Background(), &compute.AddNICInput{
+							InstanceID: d.Id(),
+							Network:    new.(string),
+						})
+						return nil, err
+					})
+					if err != nil {
+						return err
+					}
+				}
 			}
 		}
 
-		d.SetPartial("nic")
+		d.SetPartial("networks")
 	}
 
 	metadata := map[string]string{}

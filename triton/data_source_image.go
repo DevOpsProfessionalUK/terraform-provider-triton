@@ -3,6 +3,7 @@ package triton
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/joyent/triton-go/compute"
@@ -53,8 +54,19 @@ func dataSourceImage() *schema.Resource {
 				Optional: true,
 				ForceNew: true,
 			},
+
+			"most_recent": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  false,
+				ForceNew: true,
+			},
 		},
 	}
+}
+
+func mostRecentImages(images []*compute.Image) *compute.Image {
+	return sortImages(images)[0]
 }
 
 func dataSourceImageRead(d *schema.ResourceData, meta interface{}) error {
@@ -81,10 +93,10 @@ func dataSourceImageRead(d *schema.ResourceData, meta interface{}) error {
 		input.State = state.(string)
 	}
 	if owner, hasOwner := d.GetOk("owner"); hasOwner {
-		input.State = owner.(string)
+		input.Owner = owner.(string)
 	}
 	if imageType, hasImageType := d.GetOk("type"); hasImageType {
-		input.State = imageType.(string)
+		input.Type = imageType.(string)
 	}
 
 	images, err := c.Images().List(context.Background(), input)
@@ -92,16 +104,25 @@ func dataSourceImageRead(d *schema.ResourceData, meta interface{}) error {
 		return err
 	}
 
+	var image *compute.Image
 	if len(images) == 0 {
 		return fmt.Errorf("Your query returned no results. Please change " +
 			"your search criteria and try again.")
 	}
 
 	if len(images) > 1 {
-		return fmt.Errorf("Your query returned more than one result. " +
-			"Please try a more specific search criteria.")
+		recent := d.Get("most_recent").(bool)
+		log.Printf("[DEBUG] triton_image - multiple results found and `most_recent` is set to: %t", recent)
+		if recent {
+			image = mostRecentImages(images)
+		} else {
+			return fmt.Errorf("Your query returned more than one result. " +
+				"Please try a more specific search criteria.")
+		}
+	} else {
+		image = images[0]
 	}
 
-	d.SetId(images[0].ID)
+	d.SetId(image.ID)
 	return nil
 }
